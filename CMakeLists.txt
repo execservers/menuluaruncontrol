@@ -27,7 +27,7 @@ endif()
 add_library(menuluaruncontrol SHARED src/menuluaruncontrol.cpp)
 target_include_directories(menuluaruncontrol PRIVATE "${garrysmod_common_SOURCE_DIR}/include")
 target_compile_features(menuluaruncontrol PRIVATE cxx_std_17)
-target_compile_definitions(menuluaruncontrol PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_compile_definitions(menuluaruncontrol PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0601)
 target_compile_options(menuluaruncontrol PRIVATE /W4 /EHsc /permissive-)
 set_property(TARGET menuluaruncontrol PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
@@ -35,6 +35,14 @@ if(MENULUARUNCONTROL_STDOUT)
   target_sources(menuluaruncontrol PRIVATE src/stdout_console.cpp)
   target_compile_definitions(menuluaruncontrol PRIVATE MENULUARUNCONTROL_STDOUT=1)
   set(DLL_NAME "menuluaruncontrol_stdout_win${TARGET_BITS}")
+  # The injected game process must NOT attach to the diagnostic console:
+  # closing a console terminates all attached processes on Windows.
+  add_executable(menuluaruncontrol_console src/console_viewer.cpp)
+  target_compile_features(menuluaruncontrol_console PRIVATE cxx_std_17)
+  target_compile_options(menuluaruncontrol_console PRIVATE /W4 /EHsc /permissive-)
+  set_property(TARGET menuluaruncontrol_console PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+  set_target_properties(menuluaruncontrol_console PROPERTIES
+    OUTPUT_NAME "menuluaruncontrol_console_win${TARGET_BITS}")
 else()
   set(DLL_NAME "menuluaruncontrol_win${TARGET_BITS}")
 endif()

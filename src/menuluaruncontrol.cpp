@@ -41,6 +41,13 @@ std::atomic<DWORD> g_luaThread{0};
 std::atomic<bool> g_ready{false};
 std::atomic<bool> g_failed{false};
 std::atomic<HHOOK> g_msgHook{nullptr};
+#ifdef MENULUARUNCONTROL_STDOUT
+std::atomic<bool> g_stopRequested{false};
+std::atomic<bool> g_uninstalled{false};
+std::atomic<HWND> g_gameWindow{nullptr};
+HMODULE g_dll = nullptr;
+void** g_vtable = nullptr;
+#endif
 RunStringFn g_originalRunString = nullptr;
 RunStringExFn g_originalRunStringEx = nullptr;
 
@@ -129,6 +136,9 @@ std::optional<std::string> Intercept(ILuaInterface* self,
                                      const char* filename,
                                      const char* code) {
     if (!g_ready.load(std::memory_order_acquire) || !self || !code ||
+#ifdef MENULUARUNCONTROL_STDOUT
+        g_stopRequested.load(std::memory_order_acquire) ||
+#endif
         g_inMenuCallback || GetCurrentThreadId() != g_luaThread.load(std::memory_order_acquire)) {
         return std::nullopt;
     }
@@ -203,7 +213,7 @@ bool DETOUR_CALL OnRunStringEx(DETOUR_THIS const char* filename, const char* pat
 
 // Patches the vtable of the concrete CLuaInterface implementation. It is
 // shared by MENU and CLIENT, but Intercept only acts on the CLIENT instance.
-// We PIN the DLL and do not attempt hot-unload or detour removal.
+// The DLL remains pinned; _stdout_ safely restores our detours on close.
 bool PatchSlot(void** slot, void* replacement) {
     DWORD oldProtection = 0;
     if (!VirtualProtect(slot, sizeof(void*), PAGE_READWRITE, &oldProtection)) return false;
@@ -241,6 +251,10 @@ bool Install() {
 
     auto** vtable = *reinterpret_cast<void***>(menu);
     if (!vtable || !vtable[kRunStringSlot] || !vtable[kRunStringExSlot]) return false;
+#ifdef MENULUARUNCONTROL_STDOUT
+    if (g_stopRequested.load(std::memory_order_acquire)) return false;
+    g_vtable = vtable;
+#endif
     g_originalRunString = reinterpret_cast<RunStringFn>(vtable[kRunStringSlot]);
     g_originalRunStringEx = reinterpret_cast<RunStringExFn>(vtable[kRunStringExSlot]);
     g_shared.store(shared, std::memory_order_release);
@@ -259,6 +273,43 @@ bool Install() {
     return true;
 }
 
+#ifdef MENULUARUNCONTROL_STDOUT
+// Restores only our OWN vtable slots. Another patcher may have modified them
+// after installation; never overwrite that third party's pointer. The DLL is
+// intentionally pinned even after disable, avoiding dangling detour addresses.
+bool RestoreSlot(void** slot, void* detour, void* original) {
+    DWORD previous = 0;
+    if (!VirtualProtect(slot, sizeof(void*), PAGE_READWRITE, &previous)) return false;
+    void* before = InterlockedCompareExchangePointer(
+        reinterpret_cast<PVOID volatile*>(slot), original, detour);
+    DWORD unused = 0;
+    VirtualProtect(slot, sizeof(void*), previous, &unused);
+    return before == detour || before == original;
+}
+
+void UninstallOnLuaThread() {
+    // Called only on the game window thread. Stop dispatch first, then restore.
+    g_ready.store(false, std::memory_order_release);
+    if (g_vtable) {
+        RestoreSlot(&g_vtable[kRunStringExSlot],
+            reinterpret_cast<void*>(&OnRunStringEx),
+            reinterpret_cast<void*>(g_originalRunStringEx));
+        RestoreSlot(&g_vtable[kRunStringSlot],
+            reinterpret_cast<void*>(&OnRunString),
+            reinterpret_cast<void*>(g_originalRunString));
+    }
+    g_uninstalled.store(true, std::memory_order_release);
+}
+
+// Called on the asynchronous IPC writer thread, never directly touching Lua
+// or the game vtable. Post a message to arrange restoration on the Lua thread.
+void OnViewerClosed() {
+    g_stopRequested.store(true, std::memory_order_release);
+    HWND window = g_gameWindow.load(std::memory_order_acquire);
+    if (window) PostMessageW(window, WM_NULL, 0, 0);
+}
+#endif
+
 // Protect against access violations while probing startup-only interface APIs.
 int WINAPI ProbeExceptionFilter(EXCEPTION_POINTERS*) {
     g_failed.store(true, std::memory_order_release);
@@ -273,7 +324,16 @@ bool GuardedInstall() {
 }
 
 LRESULT CALLBACK OnWindowMessage(int code, WPARAM wp, LPARAM lp) {
+#ifdef MENULUARUNCONTROL_STDOUT
+    if (code >= 0 && g_stopRequested.load(std::memory_order_acquire) &&
+        !g_uninstalled.load(std::memory_order_acquire)) {
+        UninstallOnLuaThread();
+    }
+#endif
     if (code >= 0 && !g_ready.load(std::memory_order_acquire) &&
+#ifdef MENULUARUNCONTROL_STDOUT
+        !g_stopRequested.load(std::memory_order_acquire) &&
+#endif
         !g_failed.load(std::memory_order_acquire)) {
         static thread_local bool busy = false;
         static thread_local ULONGLONG nextTry = 0;
@@ -313,12 +373,22 @@ DWORD WINAPI Bootstrap(void*) {
         return 1;
     }
 #ifdef MENULUARUNCONTROL_STDOUT
-    StdoutConsole::Start();
+    if (!StdoutConsole::Start(g_dll, &OnViewerClosed)) {
+        g_failed.store(true, std::memory_order_release);
+        return 1;
+    }
 #endif
     while (!g_ready.load(std::memory_order_acquire) &&
-           !g_failed.load(std::memory_order_acquire)) {
+           !g_failed.load(std::memory_order_acquire)
+#ifdef MENULUARUNCONTROL_STDOUT
+           && !g_stopRequested.load(std::memory_order_acquire)
+#endif
+    ) {
         WindowThread window{};
         EnumWindows(&FindGameWindow, reinterpret_cast<LPARAM>(&window));
+#ifdef MENULUARUNCONTROL_STDOUT
+        if (window.hwnd) g_gameWindow.store(window.hwnd, std::memory_order_release);
+#endif
         if (window.hwnd && window.id && !g_msgHook.load(std::memory_order_acquire)) {
             HHOOK hook = SetWindowsHookExW(WH_GETMESSAGE, &OnWindowMessage, nullptr, window.id);
             if (hook) g_msgHook.store(hook, std::memory_order_release);
@@ -327,6 +397,18 @@ DWORD WINAPI Bootstrap(void*) {
             PostMessageW(window.hwnd, WM_NULL, 0, 0);
         Sleep(500);
     }
+#ifdef MENULUARUNCONTROL_STDOUT
+    // Keep WH_GETMESSAGE installed until the viewer closes so restoration
+    // happens on the GUI/Lua thread rather than racing it from the IPC thread.
+    if (g_ready.load(std::memory_order_acquire)) {
+        while (!g_stopRequested.load(std::memory_order_acquire)) Sleep(100);
+        while (!g_uninstalled.load(std::memory_order_acquire)) {
+            HWND window = g_gameWindow.load(std::memory_order_acquire);
+            if (window) PostMessageW(window, WM_NULL, 0, 0);
+            Sleep(100);
+        }
+    }
+#endif
     HHOOK hook = g_msgHook.exchange(nullptr, std::memory_order_acq_rel);
     if (hook) UnhookWindowsHookEx(hook);
     return g_ready.load(std::memory_order_acquire) ? 0 : 1;
@@ -335,6 +417,9 @@ DWORD WINAPI Bootstrap(void*) {
 
 BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {
+#ifdef MENULUARUNCONTROL_STDOUT
+        g_dll = instance;
+#endif
         DisableThreadLibraryCalls(instance);
         HANDLE thread = CreateThread(nullptr, 0, &Bootstrap, nullptr, 0, nullptr);
         if (!thread) return FALSE;
@@ -343,8 +428,11 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID) {
     return TRUE;
 }
 
-// Status: 0 waiting for MENU, 1 active, -1 installation failed.
+// Status: 0 waiting for MENU, 1 active, 2 disabled on console close, -1 failed.
 extern "C" __declspec(dllexport) int __cdecl LuaRunControl_Status() {
+#ifdef MENULUARUNCONTROL_STDOUT
+    if (g_stopRequested.load(std::memory_order_acquire)) return 2;
+#endif
     if (g_failed.load(std::memory_order_acquire)) return -1;
     return g_ready.load(std::memory_order_acquire) ? 1 : 0;
 }

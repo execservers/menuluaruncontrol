@@ -42,11 +42,13 @@ jobs:
         run: cmake -S . -B build -A ${{ matrix.arch }} -DMENULUARUNCONTROL_STDOUT=${{ matrix.stdout }}
       - name: Build Release
         run: cmake --build build --config Release --parallel
-      - name: Upload DLL
+      - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: menuluaruncontrol-${{ matrix.mode }}-win${{ matrix.bits }}
-          path: build/Release/${{ matrix.dll }}
+          path: |
+            build/Release/${{ matrix.dll }}
+            build/Release/menuluaruncontrol_console_win*.exe
           if-no-files-found: error
 
   release:
@@ -65,7 +67,7 @@ jobs:
           pattern: menuluaruncontrol-*
           path: dist
           merge-multiple: true
-      - name: Verify all four DLLs
+      - name: Verify four DLLs and two companion viewers
         shell: bash
         run: |
           set -euo pipefail
@@ -73,7 +75,9 @@ jobs:
             menuluaruncontrol_win32.dll \
             menuluaruncontrol_win64.dll \
             menuluaruncontrol_stdout_win32.dll \
-            menuluaruncontrol_stdout_win64.dll; do
+            menuluaruncontrol_stdout_win64.dll \
+            menuluaruncontrol_console_win32.exe \
+            menuluaruncontrol_console_win64.exe; do
             test -s "dist/$dll"
           done
       - name: Publish commit release
@@ -84,13 +88,18 @@ jobs:
         run: |
           set -euo pipefail
           tag="commit-${GITHUB_SHA:0:12}"
+          commit_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA}"
+          notes="$(printf '%s\n\n**Source commit:** [%s](%s)\n\n%s\n' \
+            'Automated x86/x64 default and _stdout_ builds.' \
+            "$GITHUB_SHA" "$commit_url" \
+            'The _stdout_ DLL requires its matching console viewer EXE in the same directory.')"
           if gh release view "$tag" >/dev/null 2>&1; then
-            # Idempotent reruns. Also works for repositories with immutable releases.
-            echo "Release $tag already exists; leaving it unchanged."
+            # Update the description only. Do not replace immutable release assets.
+            gh release edit "$tag" --notes "$notes"
           else
-            gh release create "$tag" dist/*.dll \
+            gh release create "$tag" dist/*.dll dist/*.exe \
               --target "$GITHUB_SHA" \
               --title "$tag" \
-              --notes "Automated x86/x64 default and _stdout_ builds for $GITHUB_SHA" \
+              --notes "$notes" \
               --latest=false
           fi
