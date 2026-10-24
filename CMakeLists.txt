@@ -5,6 +5,8 @@ if(NOT WIN32 OR NOT MSVC)
   message(FATAL_ERROR "menuluaruncontrol requires MSVC on Windows (Win32 or x64).")
 endif()
 
+option(MENULUARUNCONTROL_STDOUT "Build the _stdout_ DLL with an async console" OFF)
+
 include(FetchContent)
 # Lua headers are fetched during configuration, not when loading the DLL.
 FetchContent_Declare(garrysmod_common
@@ -28,9 +30,18 @@ target_compile_features(menuluaruncontrol PRIVATE cxx_std_17)
 target_compile_definitions(menuluaruncontrol PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_compile_options(menuluaruncontrol PRIVATE /W4 /EHsc /permissive-)
 set_property(TARGET menuluaruncontrol PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+
+if(MENULUARUNCONTROL_STDOUT)
+  target_sources(menuluaruncontrol PRIVATE src/stdout_console.cpp)
+  target_compile_definitions(menuluaruncontrol PRIVATE MENULUARUNCONTROL_STDOUT=1)
+  set(DLL_NAME "menuluaruncontrol_stdout_win${TARGET_BITS}")
+else()
+  set(DLL_NAME "menuluaruncontrol_win${TARGET_BITS}")
+endif()
+
 set_target_properties(menuluaruncontrol PROPERTIES
   PREFIX ""
-  OUTPUT_NAME "menuluaruncontrol_win${TARGET_BITS}"
+  OUTPUT_NAME "${DLL_NAME}"
 )
-# No logger, no HTTP, no third-party detouring library.
+# No HTTP code, log files or third-party detouring library.
 target_link_libraries(menuluaruncontrol PRIVATE user32)

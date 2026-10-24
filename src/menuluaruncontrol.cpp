@@ -15,6 +15,10 @@
 #include <string>
 #include <utility>
 
+#ifdef MENULUARUNCONTROL_STDOUT
+#include "stdout_console.h"
+#endif
+
 namespace {
 using GarrysMod::Lua::ILuaBase;
 using GarrysMod::Lua::ILuaInterface;
@@ -134,7 +138,12 @@ std::optional<std::string> Intercept(ILuaInterface* self,
             return std::nullopt; // Never intercept SERVER or MENU.
         ILuaInterface* menu = shared->GetLuaInterface(GarrysMod::Lua::State::MENU);
         if (!menu) return std::nullopt;
-        return MenuOverride(static_cast<ILuaBase*>(menu), NormalizeFile(filename), code);
+        const std::string file = NormalizeFile(filename);
+        auto replacement = MenuOverride(static_cast<ILuaBase*>(menu), file, code);
+#ifdef MENULUARUNCONTROL_STDOUT
+        StdoutConsole::Publish(file, code, replacement);
+#endif
+        return replacement;
     } catch (...) {
         return std::nullopt; // Never let C++ exceptions escape into GMod.
     }
@@ -303,6 +312,9 @@ DWORD WINAPI Bootstrap(void*) {
         g_failed.store(true, std::memory_order_release);
         return 1;
     }
+#ifdef MENULUARUNCONTROL_STDOUT
+    StdoutConsole::Start();
+#endif
     while (!g_ready.load(std::memory_order_acquire) &&
            !g_failed.load(std::memory_order_acquire)) {
         WindowThread window{};

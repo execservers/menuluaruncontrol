@@ -1,7 +1,8 @@
-name: Build x86 and x64 DLLs
+name: Build x86 and x64 DLLs and release
 
 on:
   push:
+    branches: ['**']
   pull_request:
   workflow_dispatch:
 
@@ -9,7 +10,7 @@ permissions:
   contents: read
 
 jobs:
-  windows:
+  build:
     runs-on: windows-2022
     strategy:
       fail-fast: false
@@ -17,17 +18,79 @@ jobs:
         include:
           - arch: Win32
             bits: '32'
+            mode: default
+            stdout: 'OFF'
+            dll: menuluaruncontrol_win32.dll
           - arch: x64
             bits: '64'
+            mode: default
+            stdout: 'OFF'
+            dll: menuluaruncontrol_win64.dll
+          - arch: Win32
+            bits: '32'
+            mode: stdout
+            stdout: 'ON'
+            dll: menuluaruncontrol_stdout_win32.dll
+          - arch: x64
+            bits: '64'
+            mode: stdout
+            stdout: 'ON'
+            dll: menuluaruncontrol_stdout_win64.dll
     steps:
       - uses: actions/checkout@v4
-      - name: Configure ${{ matrix.arch }}
-        run: cmake -S . -B "build-${{ matrix.bits }}" -A ${{ matrix.arch }}
+      - name: Configure ${{ matrix.arch }} / ${{ matrix.mode }}
+        run: cmake -S . -B build -A ${{ matrix.arch }} -DMENULUARUNCONTROL_STDOUT=${{ matrix.stdout }}
       - name: Build Release
-        run: cmake --build "build-${{ matrix.bits }}" --config Release --parallel
+        run: cmake --build build --config Release --parallel
       - name: Upload DLL
         uses: actions/upload-artifact@v4
         with:
-          name: menuluaruncontrol-win${{ matrix.bits }}
-          path: build-${{ matrix.bits }}/Release/menuluaruncontrol_win${{ matrix.bits }}.dll
+          name: menuluaruncontrol-${{ matrix.mode }}-win${{ matrix.bits }}
+          path: build/Release/${{ matrix.dll }}
           if-no-files-found: error
+
+  release:
+    # PRs only build. Every pushed commit and manual run publishes its DLLs.
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: menuluaruncontrol-release-${{ github.sha }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: menuluaruncontrol-*
+          path: dist
+          merge-multiple: true
+      - name: Verify all four DLLs
+        shell: bash
+        run: |
+          set -euo pipefail
+          for dll in \
+            menuluaruncontrol_win32.dll \
+            menuluaruncontrol_win64.dll \
+            menuluaruncontrol_stdout_win32.dll \
+            menuluaruncontrol_stdout_win64.dll; do
+            test -s "dist/$dll"
+          done
+      - name: Publish commit release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          tag="commit-${GITHUB_SHA:0:12}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            # Idempotent reruns. Also works for repositories with immutable releases.
+            echo "Release $tag already exists; leaving it unchanged."
+          else
+            gh release create "$tag" dist/*.dll \
+              --target "$GITHUB_SHA" \
+              --title "$tag" \
+              --notes "Automated x86/x64 default and _stdout_ builds for $GITHUB_SHA" \
+              --latest=false
+          fi
