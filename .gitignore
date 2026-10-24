@@ -1,0 +1,9 @@
+/build*/
+.vs/
+*.suo
+*.user
+README.md
+examples/*.lua
+*.ps1
+structure.txt
+*.7z

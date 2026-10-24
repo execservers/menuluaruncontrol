@@ -1,0 +1,33 @@
+name: Build x86 and x64 DLLs
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: Win32
+            bits: '32'
+          - arch: x64
+            bits: '64'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure ${{ matrix.arch }}
+        run: cmake -S . -B "build-${{ matrix.bits }}" -A ${{ matrix.arch }}
+      - name: Build Release
+        run: cmake --build "build-${{ matrix.bits }}" --config Release --parallel
+      - name: Upload DLL
+        uses: actions/upload-artifact@v4
+        with:
+          name: menuluaruncontrol-win${{ matrix.bits }}
+          path: build-${{ matrix.bits }}/Release/menuluaruncontrol_win${{ matrix.bits }}.dll
+          if-no-files-found: error
